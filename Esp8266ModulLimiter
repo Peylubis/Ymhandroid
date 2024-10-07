@@ -1,0 +1,115 @@
+#include <ESP8266WiFi.h>
+#include <ESPAsyncWebServer.h>
+
+const char* ssid = "ESP8266";
+const char* password = "782782";
+
+const int relayPin = D1;
+const int rpmSensorPin = D2;
+
+volatile int rpmCount = 0;
+int rpmValue = 0;
+unsigned long lastMillis = 0;
+bool relayState = false;
+bool limiterActive = false;
+int rpmLimit = 6000;  // Default limiter RPM
+
+AsyncWebServer server(80);
+
+// Fungsi Interrupt untuk menghitung pulsa dari sensor RPM
+void IRAM_ATTR rpmPulse() {
+  rpmCount++;
+}
+
+// Fungsi untuk menghitung RPM berdasarkan pulsa sensor
+void calculateRPM() {
+  unsigned long currentMillis = millis();
+  if (currentMillis - lastMillis >= 1000) {
+    rpmValue = (rpmCount * 60);  // Menghitung RPM (60 pulsa per detik = RPM)
+    rpmCount = 0;
+    lastMillis = currentMillis;
+
+    // Kontrol relay berdasarkan limiter
+    if (limiterActive && rpmValue >= rpmLimit) {
+      relayState = true;
+      digitalWrite(relayPin, HIGH);  // Relay ON (Limiter Aktif)
+    } else if (limiterActive) {
+      relayState = false;
+      digitalWrite(relayPin, LOW);  // Relay OFF (Batas belum tercapai)
+    }
+  }
+}
+
+void setup() {
+  pinMode(relayPin, OUTPUT);
+  pinMode(rpmSensorPin, INPUT_PULLUP);
+
+  // Interrupt untuk menghitung RPM
+  attachInterrupt(digitalPinToInterrupt(rpmSensorPin), rpmPulse, FALLING);
+
+  Serial.begin(115200);
+
+  // Membuat Access Point dengan ESP8266
+  WiFi.softAP(ssid, password);
+  Serial.println();
+  Serial.print("Access Point Created. IP address: ");
+  Serial.println(WiFi.softAPIP());
+
+  // Menghidupkan Web Server
+  server.on("/", HTTP_GET, [](AsyncWebServerRequest *request) {
+    String html = "<h1>ESP8266 RPM Limiter and Relay Control</h1>";
+
+    // Bagian untuk menampilkan RPM
+    html += "<p><strong>Current RPM: </strong>" + String(rpmValue) + "</p>";
+
+    // Bagian untuk pengaturan RPM limiter
+    html += "<h2>Limiter Settings</h2>";
+    html += "<form action=\"/setRPM\" method=\"GET\">";
+    html += "<label for=\"rpm\">Set RPM Limit (6000-13000): </label>";
+    html += "<input type=\"number\" id=\"rpm\" name=\"rpm\" value=\"" + String(rpmLimit) + "\" min=\"6000\" max=\"13000\">";
+    html += "<input type=\"submit\" value=\"Set\">";
+    html += "</form>";
+    html += "<p>Limiter is " + String(limiterActive ? "ON" : "OFF") + "</p>";
+    html += "<a href=\"/toggleLimiter\">" + String(limiterActive ? "Turn Off Limiter" : "Turn On Limiter") + "</a>";
+
+    // Bagian untuk kontrol relay
+    html += "<h2>Relay Control</h2>";
+    html += "<p>Relay is " + String(relayState ? "ON" : "OFF") + "</p>";
+    html += "<a href=\"/toggleRelay\">" + String(relayState ? "Turn Off Relay" : "Turn On Relay") + "</a>";
+
+    request->send(200, "text/html", html);
+  });
+
+  // Endpoint untuk mengatur batas RPM Limiter
+  server.on("/setRPM", HTTP_GET, [](AsyncWebServerRequest *request) {
+    if (request->hasParam("rpm")) {
+      String rpmParam = request->getParam("rpm")->value();
+      rpmLimit = rpmParam.toInt();
+    }
+    request->redirect("/");
+  });
+
+  // Endpoint untuk mengaktifkan/mematikan limiter
+  server.on("/toggleLimiter", HTTP_GET, [](AsyncWebServerRequest *request) {
+    limiterActive = !limiterActive;
+    if (!limiterActive) {
+      digitalWrite(relayPin, LOW);  // Mematikan relay jika limiter dimatikan
+    }
+    request->redirect("/");
+  });
+
+  // Endpoint untuk mengaktifkan/mematikan relay secara manual
+  server.on("/toggleRelay", HTTP_GET, [](AsyncWebServerRequest *request) {
+    relayState = !relayState;
+    digitalWrite(relayPin, relayState ? HIGH : LOW);
+    request->redirect("/");
+  });
+
+  // Memulai server
+  server.begin();
+}
+
+void loop() {
+  // Menghitung RPM dan mengontrol relay sesuai limiter
+  calculateRPM();
+
